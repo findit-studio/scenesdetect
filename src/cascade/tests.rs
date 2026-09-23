@@ -388,6 +388,43 @@ fn frames_reject_oversized_views() {
 }
 
 #[test]
+fn max_frame_pixels_is_the_exact_accept_reject_boundary() {
+  // The law: MAX_FRAME_PIXELS is not just *a* bound but *the* boundary
+  // the refusal fires above — a view of exactly that many pixels is
+  // accepted, one more is refused.
+  let w: u32 = 1;
+  let h_at_cap = MAX_FRAME_PIXELS as u32;
+  let n = h_at_cap as usize;
+  let rgb = vec![0u8; n * 3];
+  let plane = vec![0u8; n];
+  let frames = Frames::try_new(
+    RgbFrame::new(&rgb, w, h_at_cap, w * 3, ts(0)),
+    LumaFrame::new(&plane, w, h_at_cap, w, ts(0)),
+    HsvFrame::new(&plane, &plane, &plane, w, h_at_cap, w, ts(0)),
+  );
+  assert!(
+    frames.is_ok(),
+    "exactly MAX_FRAME_PIXELS pixels ({h_at_cap}) is accepted"
+  );
+
+  let h_past_cap = h_at_cap + 1;
+  let n = h_past_cap as usize;
+  let rgb = vec![0u8; n * 3];
+  let plane = vec![0u8; n];
+  let frames = Frames::try_new(
+    RgbFrame::new(&rgb, w, h_past_cap, w * 3, ts(0)),
+    LumaFrame::new(&plane, w, h_past_cap, w, ts(0)),
+    HsvFrame::new(&plane, &plane, &plane, w, h_past_cap, w, ts(0)),
+  );
+  assert_eq!(
+    frames.expect_err("one pixel past MAX_FRAME_PIXELS"),
+    FramesError::FrameTooLarge {
+      pixels: MAX_FRAME_PIXELS + 1
+    }
+  );
+}
+
+#[test]
 fn frames_reject_zero_numerator_timebases() {
   // A zero-numerator timebase names the same instant for every pts;
   // boundary ranges would need a rescale that panics downstream, so

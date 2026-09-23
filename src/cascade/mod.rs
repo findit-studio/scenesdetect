@@ -163,12 +163,14 @@ use crate::{
 /// around a boundary.
 const RING_SLACK: usize = 2;
 
-/// Upper bound on the pixel area of one analysis frame — a per-push
-/// compute bound: every enabled lane scans the frame each push, so
-/// frame size is capped up front; the crate's downscale convention (a
-/// few hundred pixels per side) sits orders of magnitude below this
-/// cap.
-const MAX_FRAME_PIXELS: u64 = 1 << 20;
+/// Upper bound on the pixel area of one analysis frame accepted by
+/// [`Frames::try_new`] — a per-push compute bound: every enabled lane
+/// scans the frame each push, so frame size is capped up front; the
+/// crate's downscale convention (a few hundred pixels per side) sits
+/// orders of magnitude below this cap. [`FramesError::FrameTooLarge`]
+/// names this constant: a view of exactly this many pixels is
+/// accepted, one more is refused.
+pub const MAX_FRAME_PIXELS: u64 = 1 << 20;
 
 /// Upper bound on the adaptive lag horizon: it caps the
 /// `2 * window + 1 + RING_SLACK` span by which an [`adaptive`] verdict
@@ -299,7 +301,7 @@ pub enum FramesError {
   /// downstream reductions assume at least one pixel).
   #[error("the views have zero width or height")]
   ZeroDimensions,
-  /// The views exceed `MAX_FRAME_PIXELS`; per-push compute is
+  /// The views exceed [`MAX_FRAME_PIXELS`]; per-push compute is
   /// bounded up front (analysis frames per the crate's downscale
   /// convention sit far below this).
   #[error("the views carry {pixels} pixels, past the cap")]

@@ -4,6 +4,19 @@ All notable changes to this crate are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`cascade::MAX_FRAME_PIXELS`.** The per-push pixel-area cap
+  `Frames::try_new` enforces is now published crate vocabulary instead
+  of a private constant — `pub const MAX_FRAME_PIXELS: u64`, beside
+  `FramesError`, whose `FrameTooLarge` variant's doc now links it
+  directly. A view of exactly `MAX_FRAME_PIXELS` pixels is accepted;
+  one more is refused. A downstream reading this cap by name, instead
+  of mirroring its value, no longer has two owners of one number to
+  keep in sync.
+
 ## 0.4.0
 
 A minor, not a patch: nothing here breaks a build — the new variant
