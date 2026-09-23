@@ -4,7 +4,10 @@ All notable changes to this crate are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.4.1
+
+A patch: one item added to the public vocabulary, and a dependency bump that no public
+signature reaches.
 
 ### Added
 
@@ -16,6 +19,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   one more is refused. A downstream reading this cap by name, instead
   of mirroring its value, no longer has two owners of one number to
   keep in sync.
+
+### Changed
+
+- **`mediaframe` requirement `0.9` → `0.11`** (the optional `mediaframe`
+  feature). No public item reaches a `mediaframe` type today — the
+  adapter module behind that feature is not compiled — so the bump
+  changes no signature a consumer builds against; it lets one graph
+  resolve a single `mediaframe` 0.11 beside the crates that already
+  moved.
+- `LICENSE-MIT` names the copyright holder as the findit-studio
+  Developers.
 
 ## 0.4.0
 
