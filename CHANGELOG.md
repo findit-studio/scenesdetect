@@ -4,6 +4,48 @@ All notable changes to this crate are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.0
+
+A minor, and breaking under this crate's 0.x-minor-is-the-boundary
+policy: the public dependency `mediatime` crosses 0.4 → 0.5, and the
+optional `mediaframe` requirement crosses 0.11 → 0.12 with it. No
+scenesdetect-authored API changes shape or behavior.
+
+### Changed
+
+- **`mediatime` 0.4 → 0.5.** `mediatime`'s types are this crate's public
+  API, so a caller holding a `mediatime` 0.4 value no longer type-checks
+  against this release. They are reached at:
+  - `frame::{Timebase, Timestamp, TimeRange}`, re-exported from
+    `mediatime` (`src/frame.rs`);
+  - every frame's constructors and `timestamp()` (`LumaFrame`,
+    `RgbFrame`, `HsvFrame`), every detector's `process*` answer
+    (`Option<Timestamp>`), and every `with_min_frames` /
+    `set_min_frames` (`fps: Timebase`);
+  - `threshold::Detector::last_fade_range` (`Option<TimeRange>`),
+    `cascade::SceneEvent::range` and `into_parts`, and
+    `keyframe::select::Detector::finalize_shot` (`TimeRange`).
+
+  What `mediatime` 0.5 removed is called nowhere here: `TimeRange`'s
+  unchecked `with_start` / `with_end` / `set_start` / `set_end` appear in
+  no line of `src`, `benches` or `examples`, and every other `Timebase`,
+  `Timestamp`, `TimeRange` and `Rate` road the crate uses kept its
+  contract. A caller that moved the ends of a re-exported
+  `frame::TimeRange` with those setters moves them now with
+  `try_with_start` / `try_with_end` (refusing an inverted range as
+  `InvertedRange`) or `with_bounds`.
+- **`mediaframe` requirement `0.11` → `0.12`** (the optional `mediaframe`
+  feature). As at 0.4.1, no public item reaches a `mediaframe` type —
+  the adapter module behind that feature is not compiled — so the bump
+  changes no signature; mediaframe 0.12 is 0.11 on `mediatime` 0.5, and
+  the feature now resolves one `mediatime` with the rest of the crate.
+
+No source line moved. The lock resolves one `mediatime` (0.5.1) and one
+`mediaframe` (0.12.0), and every lane `ci.yml` runs that this host can
+run passes against them with no repair: `cargo hack clippy --each-feature`,
+`cargo hack build` and `cargo hack test` over the feature powerset, the
+fifteen cross targets, and `rustfmt --check`.
+
 ## 0.4.1
 
 A patch: one item added to the public vocabulary, and a dependency bump that no public
