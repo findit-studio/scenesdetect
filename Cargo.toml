@@ -1,6 +1,6 @@
 [package]
 name = "scenesdetect"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 repository = "https://github.com/findit-studio/scenesdetect"
 homepage = "https://github.com/findit-studio/scenesdetect"
@@ -52,11 +52,11 @@ mediaframe = [
 [dependencies]
 derive_more = { version = "2", default-features = false, features = ["is_variant", "display"] }
 thiserror = { version = "2", default-features = false }
-mediatime = { version = "0.4", default-features = false }
+mediatime = { version = "0.5", default-features = false }
 libm = { version = "0.2", optional = true, default-features = false }
 fast_image_resize = { version = "6", default-features = false, optional = true }
 half = { version = "2", optional = true, default-features = false }
-mediaframe = { version = "0.11", optional = true, default-features = false }
+mediaframe = { version = "0.12", optional = true, default-features = false }
 
 serde = { version = "1", default-features = false, features = [
   "derive",
