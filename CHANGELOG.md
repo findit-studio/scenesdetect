@@ -4,6 +4,25 @@ All notable changes to this crate are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.1
+
+Additive: a caller that knows where its stream truly ends can close the
+trailing shot there.
+
+### Added
+
+- **`cascade::Detector::finalize_at(end)`.** `finalize` closes the
+  trailing shot one tick past the last pushed frame, which is where a
+  stream ends only when its last frame lasts a single tick.
+  `finalize_at` closes it at `end` — the last frame's timestamp plus
+  that frame's duration — and is otherwise `finalize`: the deferred and
+  terminal-fade boundaries close first, the remaining keyframes drain
+  inside the trailing range, no boundary keyframe is emitted at the
+  end, and the detector refreshes for the next stream. `end` is
+  ceiling-rescaled into the stream's canonical timebase, as every range
+  endpoint is; an `end` that is not past the last frame closes one tick
+  past it, exactly where `finalize` closes.
+
 ## 0.5.0
 
 A minor, and breaking under this crate's 0.x-minor-is-the-boundary

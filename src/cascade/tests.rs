@@ -1011,6 +1011,111 @@ fn finalize_refreshes_for_the_next_stream() {
   assert!(s[0].provenance_ref().is_finalized());
 }
 
+/// Six frames 33 ms apart — 0 through 165 ms — whose last frame is shown
+/// until 198 ms.
+fn finalize_at_fixture(det: &mut Detector) -> Vec<Event> {
+  let fix = Fixture::striped(40, 220, 20, 180);
+  push_run(det, &fix, 0, 6, 33)
+}
+
+#[test]
+fn finalize_at_closes_the_trailing_shot_at_the_stated_end() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  outputs.extend(det.finalize_at(ts(198)));
+
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert!(
+    trailing.range().end().cmp_semantic(&ts(198)).is_eq(),
+    "the trailing shot ends where the last frame stops being shown: {:?}",
+    trailing.range()
+  );
+  assert!(trailing.provenance_ref().is_finalized());
+  for k in keyframes(&outputs) {
+    assert!(
+      k.timestamp().cmp_semantic(&ts(198)).is_lt(),
+      "no keyframe at or past the end: {:?}",
+      k.timestamp()
+    );
+  }
+}
+
+#[test]
+fn finalize_at_ceils_the_end_into_the_streams_timebase() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  // 4 753 / 24 000 s is 198.04 ms: the stream runs at 1/1000, and the
+  // end takes the ceiling every range endpoint takes there.
+  let fine = Timebase::new(1, NonZeroI32::new(24_000).expect("non-zero"));
+  outputs.extend(det.finalize_at(Timestamp::new(4_753, fine)));
+
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert_eq!(
+    trailing.range().end().timebase(),
+    tb(),
+    "the stream's own timebase"
+  );
+  assert!(
+    trailing.range().end().cmp_semantic(&ts(199)).is_eq(),
+    "198.04 ms rounds up to 199 ms: {:?}",
+    trailing.range()
+  );
+}
+
+#[test]
+fn finalize_at_an_end_not_past_the_last_frame_closes_where_finalize_does() {
+  let mut plain = detector(fixture_options());
+  let mut expected = finalize_at_fixture(&mut plain);
+  expected.extend(plain.finalize());
+  let expected_end = scenes(&expected)
+    .last()
+    .expect("finalize closes the trailing shot")
+    .range()
+    .end();
+  assert!(
+    expected_end.cmp_semantic(&ts(166)).is_eq(),
+    "one tick past the last frame"
+  );
+
+  for stated in [ts(165), ts(100), ts(-5)] {
+    let mut det = detector(fixture_options());
+    let mut outputs = finalize_at_fixture(&mut det);
+    outputs.extend(det.finalize_at(stated));
+    assert_eq!(
+      scenes(&outputs),
+      scenes(&expected),
+      "an end at or before the last frame ({stated:?}) closes one tick past it"
+    );
+    assert_eq!(keyframes(&outputs), keyframes(&expected));
+  }
+}
+
+#[test]
+fn finalize_at_with_nothing_pushed_emits_nothing() {
+  let mut det = detector(fixture_options());
+  assert!(det.finalize_at(ts(1_000)).is_empty());
+}
+
+#[test]
+fn finalize_at_refreshes_for_the_next_stream() {
+  let mut det = detector(fixture_options());
+  let mut first = finalize_at_fixture(&mut det);
+  first.extend(det.finalize_at(ts(198)));
+  assert!(!scenes(&first).is_empty(), "first stream closed");
+
+  let mut second = finalize_at_fixture(&mut det);
+  second.extend(det.finalize());
+  let s = scenes(&second);
+  assert_eq!(s.len(), 1, "reused detector behaves like a fresh one");
+  assert!(s[0].range().start().cmp_semantic(&ts(0)).is_eq());
+  assert!(
+    s[0].range().end().cmp_semantic(&ts(166)).is_eq(),
+    "the stated end of the first stream does not leak into the second"
+  );
+}
+
 #[test]
 fn clear_discards_without_emitting() {
   let mut det = detector(fixture_options());

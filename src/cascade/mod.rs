@@ -62,7 +62,9 @@
 //! [`Event`]; the machine never blocks, spawns, or calls out.
 //! [`Detector::finalize`] closes the open shot, returns every remaining
 //! output in order, and refreshes all state for the next stream;
-//! [`Detector::clear`] refreshes without emitting. One stream per
+//! [`Detector::finalize_at`] does the same with the trailing shot closed
+//! at the stream's stated end; [`Detector::clear`] refreshes without
+//! emitting. One stream per
 //! detector — multiplexing belongs to the caller, as does pairing
 //! keyframe timestamps back to pixel data.
 //!
@@ -495,7 +497,8 @@ pub enum Provenance {
   /// The forced split: no detector fired within
   /// [`Options::max_scene_duration`].
   MaxSpan(SpanScore),
-  /// The shot was closed by [`Detector::finalize`] (end of stream).
+  /// The shot was closed by [`Detector::finalize`] or
+  /// [`Detector::finalize_at`] (end of stream).
   Finalized,
   /// The shot-opening frame, emitted as a keyframe unconditionally the
   /// moment a shot opens. Its qualification is *being the cut itself*,
@@ -937,7 +940,9 @@ impl Options {
   /// shot closes at the first frame at or past the cap, so with sparse
   /// timestamps a scene can exceed the cap by up to one inter-frame
   /// gap (the trailing shot closed by [`Detector::finalize`] stays
-  /// under the cap plus one tick).
+  /// under the cap plus one tick, and the one closed by
+  /// [`Detector::finalize_at`] under the cap plus the last frame's own
+  /// span up to the stated end).
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn max_scene_duration(&self) -> Option<Duration> {
     self.max_scene_duration
@@ -1036,7 +1041,8 @@ pub enum PushError {
 /// The integrated cascade detector. See the module docs for the
 /// workflow and the output contract; construct with
 /// [`Detector::try_new`], drive with [`Detector::push`], and close each
-/// stream with [`Detector::finalize`].
+/// stream with [`Detector::finalize`] (or [`Detector::finalize_at`], where
+/// the caller knows the stream's true end).
 pub struct Detector {
   options: Options,
   // Terminal fade lane + per-frame lanes (always-on, persistent
@@ -1522,7 +1528,41 @@ impl Detector {
   /// Closes the open shot — the range ends one tick past the last
   /// pushed frame — returns every remaining output in order, and
   /// refreshes all state for the next stream.
+  ///
+  /// A caller that knows where its stream truly ends — the last frame's
+  /// timestamp plus that frame's duration — closes the trailing shot
+  /// there with [`finalize_at`](Self::finalize_at) instead.
   pub fn finalize(&mut self) -> Vec<Event> {
+    self.close_stream(None)
+  }
+
+  /// Closes the open shot at `end` — the stream's TRUE end, the instant
+  /// its last frame stops being shown (that frame's timestamp plus its
+  /// duration) — returns every remaining output in order, and refreshes
+  /// all state for the next stream.
+  ///
+  /// Everything else is [`finalize`](Self::finalize)'s: the deferred and
+  /// terminal-fade boundaries close first, in timestamp order; the
+  /// trailing shot's remaining keyframes are drained inside its range;
+  /// and no boundary keyframe is emitted at `end`, because the stream is
+  /// over and no shot opens there.
+  ///
+  /// `end` is rescaled into the stream's canonical timebase (the first
+  /// frame's) with the same ceiling every range endpoint takes, so the
+  /// trailing range stays adjacent to the one before it whatever
+  /// timebase `end` is stated in. An `end` that is not past the last
+  /// pushed frame names no instant after it, so the range ends where
+  /// [`finalize`](Self::finalize) ends it — one tick past that frame —
+  /// and every pushed frame stays inside an emitted range. With no frame
+  /// pushed there is no shot to close, and `end` is not read.
+  pub fn finalize_at(&mut self, end: Timestamp) -> Vec<Event> {
+    self.close_stream(Some(end))
+  }
+
+  /// [`finalize`](Self::finalize) and [`finalize_at`](Self::finalize_at)
+  /// as one road: `stated` is the caller's end of stream, where it named
+  /// one.
+  fn close_stream(&mut self, stated: Option<Timestamp>) -> Vec<Event> {
     // Two sources may still owe boundaries at end of stream: the
     // terminal fade lane (a stream that ends mid fade-out,
     // add_final_scene) and same-push deferred reports, whose lanes
@@ -1568,18 +1608,25 @@ impl Detector {
       }
     }
     // Drain the selector's remaining frames as the trailing shot's
-    // keyframes, then close that shot one tick past the last frame.
-    // The trailing close is gated on the scene actually emitting, so a
-    // range that collapses under the canonical timebase cannot leave
-    // orphan keyframes (they parent to a neighboring range by
-    // timestamp).
+    // keyframes, then close that shot at the stated end, or one tick
+    // past the last frame where none was stated (or the stated one is
+    // not past that frame). The trailing close is gated on the scene
+    // actually emitting, so a range that collapses under the canonical
+    // timebase cannot leave orphan keyframes (they parent to a
+    // neighboring range by timestamp).
     if let (Some(_), Some(last)) = (self.shot_start, self.last_ts) {
-      let end = Timestamp::new(last.pts().saturating_add(1), last.timebase());
+      // `last` is in the canonical timebase: push normalized it.
+      let tb = last.timebase();
+      let one_past = Timestamp::new(last.pts().saturating_add(1), tb);
+      let end = stated
+        .map(|stated| Timestamp::new(rescale_ceil(stated, tb), tb))
+        .filter(|stated| stated.cmp_semantic(&one_past).is_gt())
+        .unwrap_or(one_past);
       self.finalize_window(end);
       // The scene ONLY — the stream is over, so no shot opens at `end`
       // and no boundary keyframe is owed there. Emitting one would
-      // strand a keyframe one tick past the last frame, outside every
-      // emitted range.
+      // strand a keyframe at or past the end, outside every emitted
+      // range.
       self.emit_scene_at(end, Provenance::Finalized);
     }
     let outputs = self.pending.drain(..).collect();
