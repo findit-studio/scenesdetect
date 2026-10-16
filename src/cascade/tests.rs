@@ -1022,7 +1022,7 @@ fn finalize_at_fixture(det: &mut Detector) -> Vec<Event> {
 fn finalize_at_closes_the_trailing_shot_at_the_stated_end() {
   let mut det = detector(fixture_options());
   let mut outputs = finalize_at_fixture(&mut det);
-  outputs.extend(det.finalize_at(ts(198)));
+  outputs.extend(det.finalize_at(ts(198)).expect("a representable end"));
 
   let s = scenes(&outputs);
   let trailing = s.last().expect("the trailing shot closes");
@@ -1048,7 +1048,11 @@ fn finalize_at_ceils_the_end_into_the_streams_timebase() {
   // 4 753 / 24 000 s is 198.04 ms: the stream runs at 1/1000, and the
   // end takes the ceiling every range endpoint takes there.
   let fine = Timebase::new(1, NonZeroI32::new(24_000).expect("non-zero"));
-  outputs.extend(det.finalize_at(Timestamp::new(4_753, fine)));
+  outputs.extend(
+    det
+      .finalize_at(Timestamp::new(4_753, fine))
+      .expect("a representable end"),
+  );
 
   let s = scenes(&outputs);
   let trailing = s.last().expect("the trailing shot closes");
@@ -1082,7 +1086,7 @@ fn finalize_at_an_end_not_past_the_last_frame_closes_where_finalize_does() {
   for stated in [ts(165), ts(100), ts(-5)] {
     let mut det = detector(fixture_options());
     let mut outputs = finalize_at_fixture(&mut det);
-    outputs.extend(det.finalize_at(stated));
+    outputs.extend(det.finalize_at(stated).expect("a representable end"));
     assert_eq!(
       scenes(&outputs),
       scenes(&expected),
@@ -1095,14 +1099,74 @@ fn finalize_at_an_end_not_past_the_last_frame_closes_where_finalize_does() {
 #[test]
 fn finalize_at_with_nothing_pushed_emits_nothing() {
   let mut det = detector(fixture_options());
-  assert!(det.finalize_at(ts(1_000)).is_empty());
+  assert!(
+    det
+      .finalize_at(ts(1_000))
+      .expect("a representable end")
+      .is_empty()
+  );
+}
+
+#[test]
+fn finalize_at_refuses_an_end_with_no_canonical_representation() {
+  // The stream runs at 1/M with M = i32::MAX, and the end is i64::MAX
+  // ticks of M seconds each: its canonical rescale is i64::MAX * M * M
+  // ticks, which no i64 holds.
+  let m = i32::MAX;
+  let fine = Timebase::new(1, NonZeroI32::new(m).expect("non-zero"));
+  let coarse = Timebase::new(m, NonZeroI32::new(1).expect("non-zero"));
+  let fix = Fixture::striped(40, 220, 20, 180);
+  let push_first = |det: &mut Detector| {
+    det
+      .push(fix.frames(Timestamp::new(0, fine)))
+      .expect("an ordered first frame")
+  };
+
+  let mut det = detector(fixture_options());
+  let mut outputs: Vec<Event> = push_first(&mut det).into_iter().collect();
+  let end = Timestamp::new(i64::MAX, coarse);
+  let refused = det
+    .finalize_at(end)
+    .expect_err("an end the canonical timebase cannot hold is refused, not clamped");
+  assert_eq!(refused.end(), end);
+  assert_eq!(
+    refused.timebase(),
+    fine,
+    "the canonical timebase is the first frame's"
+  );
+
+  // The refusal changed nothing: the same detector closes the stream
+  // exactly as one that was never asked would.
+  outputs.extend(det.finalize());
+  let mut fresh = detector(fixture_options());
+  let mut expected: Vec<Event> = push_first(&mut fresh).into_iter().collect();
+  expected.extend(fresh.finalize());
+  assert_eq!(outputs, expected);
+}
+
+#[test]
+fn finalize_at_takes_the_largest_representable_end() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  outputs.extend(
+    det
+      .finalize_at(ts(i64::MAX))
+      .expect("the canonical limit itself is representable"),
+  );
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert!(
+    trailing.range().end().cmp_semantic(&ts(i64::MAX)).is_eq(),
+    "the stated end is the range's end, unclamped: {:?}",
+    trailing.range()
+  );
 }
 
 #[test]
 fn finalize_at_refreshes_for_the_next_stream() {
   let mut det = detector(fixture_options());
   let mut first = finalize_at_fixture(&mut det);
-  first.extend(det.finalize_at(ts(198)));
+  first.extend(det.finalize_at(ts(198)).expect("a representable end"));
   assert!(!scenes(&first).is_empty(), "first stream closed");
 
   let mut second = finalize_at_fixture(&mut det);

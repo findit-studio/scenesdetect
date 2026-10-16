@@ -1034,6 +1034,40 @@ pub enum PushError {
   TimestampAtLimit,
 }
 
+/// Why [`Detector::finalize_at`] refused an end of stream: the end has no
+/// representation in the stream's canonical timebase.
+///
+/// The trailing range is stated in the canonical timebase (the first
+/// frame's), and `end` rescales into it with the ceiling every range
+/// endpoint takes. An `end` whose rescale does not fit an `i64` pts names
+/// no instant there, so it is refused rather than clamped to the limit —
+/// a clamp would close the stream at an instant the caller never stated.
+/// The detector is left exactly as it was: the caller may call again with
+/// another end, or with [`Detector::finalize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error(
+  "the stated end of stream {end:?} has no representation in the stream's timebase {timebase:?}"
+)]
+pub struct EndNotRepresentable {
+  end: Timestamp,
+  timebase: Timebase,
+}
+
+impl EndNotRepresentable {
+  /// The end of stream the caller stated.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn end(&self) -> Timestamp {
+    self.end
+  }
+
+  /// The stream's canonical timebase — the first frame's — that `end`
+  /// could not be rescaled into.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn timebase(&self) -> Timebase {
+    self.timebase
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
@@ -1555,13 +1589,32 @@ impl Detector {
   /// [`finalize`](Self::finalize) ends it — one tick past that frame —
   /// and every pushed frame stays inside an emitted range. With no frame
   /// pushed there is no shot to close, and `end` is not read.
-  pub fn finalize_at(&mut self, end: Timestamp) -> Vec<Event> {
-    self.close_stream(Some(end))
+  ///
+  /// # Errors
+  ///
+  /// [`EndNotRepresentable`] where `end`'s rescale into the canonical
+  /// timebase does not fit an `i64` pts. It is checked before anything
+  /// else, so a refused call changes nothing: the caller may call again
+  /// with another end, or close the stream with
+  /// [`finalize`](Self::finalize).
+  pub fn finalize_at(&mut self, end: Timestamp) -> Result<Vec<Event>, EndNotRepresentable> {
+    // THE PREFLIGHT, before any end-of-stream state is touched: this end
+    // is the caller's, so push admission never vouched for it, and the
+    // clamping `rescale_ceil` would close the stream at the limit instead
+    // of at the instant stated.
+    let stated = match self.stream_timebase {
+      Some(timebase) => match rescale_ceil_checked(end, timebase) {
+        Some(pts) => Some(Timestamp::new(pts, timebase)),
+        None => return Err(EndNotRepresentable { end, timebase }),
+      },
+      None => None,
+    };
+    Ok(self.close_stream(stated))
   }
 
   /// [`finalize`](Self::finalize) and [`finalize_at`](Self::finalize_at)
-  /// as one road: `stated` is the caller's end of stream, where it named
-  /// one.
+  /// as one road: `stated` is the caller's end of stream, already in the
+  /// canonical timebase, where it named one.
   fn close_stream(&mut self, stated: Option<Timestamp>) -> Vec<Event> {
     // Two sources may still owe boundaries at end of stream: the
     // terminal fade lane (a stream that ends mid fade-out,
@@ -1619,7 +1672,6 @@ impl Detector {
       let tb = last.timebase();
       let one_past = Timestamp::new(last.pts().saturating_add(1), tb);
       let end = stated
-        .map(|stated| Timestamp::new(rescale_ceil(stated, tb), tb))
         .filter(|stated| stated.cmp_semantic(&one_past).is_gt())
         .unwrap_or(one_past);
       self.finalize_window(end);

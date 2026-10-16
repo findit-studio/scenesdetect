@@ -22,6 +22,12 @@ trailing shot there.
   ceiling-rescaled into the stream's canonical timebase, as every range
   endpoint is; an `end` that is not past the last frame closes one tick
   past it, exactly where `finalize` closes.
+- **`cascade::EndNotRepresentable`.** `finalize_at` returns
+  `Result<Vec<Event>, EndNotRepresentable>`: an end whose canonical
+  rescale does not fit an `i64` pts is refused by name — the error
+  names the end and the canonical timebase — rather than clamped to the
+  limit, and the detector is left exactly as it was, so the caller may
+  call again with another end or with `finalize`.
 
 ## 0.5.0
 
