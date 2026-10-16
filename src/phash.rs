@@ -988,7 +988,10 @@ mod tests {
     let (a, b) = ortho_halves_frames();
 
     let mut cuts = 0u32;
-    for i in 0..30i64 {
+    // Fewer under Miri, which interprets slowly: ten alternating frames
+    // are as rapid, and as far inside the second.
+    let frames: i64 = if cfg!(miri) { 10 } else { 30 };
+    for i in 0..frames {
       let frame_data = if i % 2 == 0 { &a } else { &b };
       let ts = i * 33;
       if det.process(make_frame(frame_data, 128, 96, ts)).is_some() {
