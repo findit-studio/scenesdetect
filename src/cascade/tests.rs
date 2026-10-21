@@ -76,6 +76,21 @@ fn detector(options: Options) -> Detector {
   Detector::try_new(options).expect("valid options")
 }
 
+/// One shot of the multi-shot laws, as `(frames, step in ms)`: 30 frames
+/// 40 ms apart, or under Miri 6 frames 200 ms apart. Both last
+/// [`SHOT_MS`], past every lane's `min_duration`; Miri interprets every
+/// step of every push, and these laws are the crate's heaviest under it.
+const SHOT: (i64, i64) = if cfg!(miri) { (6, 200) } else { (30, 40) };
+
+/// How long one [`SHOT`] lasts: 1.2 s either way.
+const SHOT_MS: i64 = SHOT.0 * SHOT.1;
+
+/// `frames`, or under Miri `miri` — for a law whose frames only need to
+/// outlast what it asserts ([`SHOT`]'s note).
+const fn under_miri(frames: i64, miri: i64) -> i64 {
+  if cfg!(miri) { miri } else { frames }
+}
+
 /// Push a run of identical frames, collecting outputs.
 fn push_run(det: &mut Detector, fix: &Fixture, from_ms: i64, count: i64, step: i64) -> Vec<Event> {
   let mut out = Vec::new();
@@ -188,25 +203,16 @@ fn options_validation() {
 
 #[test]
 fn consecutive_cuts_are_found() {
-  // Two transitions far enough apart for every lane's min_duration:
-  // each must surface, with per-candidate admissibility filtering so a
-  // stale lagged report can never mask a valid later one at merge.
-  let options = Options::new()
-    .with_detectors(Detectors::all())
-    .with_select(select::Options::new().with_target_interval(Duration::from_millis(100)));
-  let mut det = detector(options);
-  let red = Fixture::solid(60, 10, 200);
-  let blue = Fixture::solid(180, 120, 200);
-
-  let mut outputs = push_run(&mut det, &red, 0, 30, 40);
-  outputs.extend(push_run(&mut det, &blue, 30 * 40, 30, 40));
-  outputs.extend(push_run(&mut det, &red, 60 * 40, 30, 40));
-  outputs.extend(det.finalize());
+  // Two transitions far enough apart for every lane's min_duration
+  // (`three_shot_stream`): each must surface, with per-candidate
+  // admissibility filtering so a stale lagged report can never mask a
+  // valid later one at merge.
+  let outputs = three_shot_stream();
 
   let scenes = scenes(&outputs);
   assert_eq!(scenes.len(), 3, "both cuts plus the trailing shot");
-  assert_eq!(scenes[0].range().end().pts(), 30 * 40);
-  assert_eq!(scenes[1].range().end().pts(), 60 * 40);
+  assert_eq!(scenes[0].range().end().pts(), SHOT_MS);
+  assert_eq!(scenes[1].range().end().pts(), 2 * SHOT_MS);
 }
 
 #[test]
@@ -487,7 +493,9 @@ fn pathological_boundary_rate_keeps_the_backlog_bounded() {
 
   let mut delivered = 0usize;
   let mut backlog_max = 0usize;
-  for i in 0..600_i64 {
+  // Under Miri 300 pushes: the backlog still passes the 256-output cap
+  // after warm-up, so the shedding runs ([`under_miri`]).
+  for i in 0..under_miri(600, 300) {
     let fix = if i % 2 == 0 { &a } else { &b };
     if det
       .push(fix.frames(ts(i * 40)))
@@ -782,7 +790,7 @@ fn extractor_flags_prune_expensive_metrics() {
   let options = fixture_options().with_extractors(Extractors::COLORFULNESS);
   let mut det = detector(options);
   let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 12, 33);
+  let mut outputs = push_run(&mut det, &fix, 0, under_miri(12, 6), 33);
   outputs.extend(det.finalize());
 
   let kfs = keyframes(&outputs);
@@ -806,16 +814,19 @@ fn every_window_with_frames_yields_keyframes() {
   // 100 ms window (no adaptive lane, so finalize steps exact windows
   // up to the current frame): each closed 100 ms window yields ONE
   // keyframe. ~990 ms of frames tiles into ~10 windows = 10 keyframes,
-  // all in-range and strictly increasing.
+  // all in-range and strictly increasing. Under Miri 15 frames, ~460 ms:
+  // 5 windows, 5 keyframes.
   let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 30, 33);
+  let frames = under_miri(30, 15);
+  let mut outputs = push_run(&mut det, &fix, 0, frames, 33);
   outputs.extend(det.finalize());
 
   let kfs = keyframes(&outputs);
+  let windows = ((frames - 1) * 33 / 100 + 1) as usize;
   assert_eq!(
     kfs.len(),
-    10,
-    "one keyframe per 100 ms window over ~990 ms, got {}",
+    windows,
+    "one keyframe per 100 ms window, got {}",
     kfs.len()
   );
   for pair in kfs.windows(2) {
@@ -846,7 +857,7 @@ fn gate_failing_intervals_surface_fallback_keyframes() {
   // Solid frames have zero variance everywhere: the flat AND-gate
   // trips, stage 4 is skipped, and intervals fall back.
   let flat = Fixture::solid(120, 10, 10);
-  let mut outputs = push_run(&mut det, &flat, 0, 12, 33);
+  let mut outputs = push_run(&mut det, &flat, 0, under_miri(12, 6), 33);
   outputs.extend(det.finalize());
 
   let kfs = keyframes(&outputs);
@@ -884,7 +895,7 @@ fn gate_failing_intervals_surface_fallback_keyframes() {
 fn strict_keyframes_carry_full_metrics() {
   let mut det = detector(fixture_options());
   let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 12, 33);
+  let mut outputs = push_run(&mut det, &fix, 0, under_miri(12, 6), 33);
   outputs.extend(det.finalize());
 
   let kfs = keyframes(&outputs);
@@ -905,18 +916,35 @@ fn strict_keyframes_carry_full_metrics() {
   }
 }
 
+/// Cut-less textured frames 33 ms apart under a 200 ms cap: ~1 s of
+/// them, or under Miri 16 frames, ~500 ms ([`under_miri`]) — past the cap
+/// twice either way. Two laws read it, so with `std` it is pushed once.
+fn capped_stream() -> Vec<Event> {
+  let push = || {
+    let options = fixture_options().with_max_scene_duration(Some(Duration::from_millis(200)));
+    let mut det = detector(options);
+    let fix = Fixture::striped(40, 220, 20, 180);
+    let mut outputs = push_run(&mut det, &fix, 0, under_miri(30, 16), 33);
+    outputs.extend(det.finalize());
+    outputs
+  };
+  #[cfg(feature = "std")]
+  {
+    static STREAM: std::sync::OnceLock<Vec<Event>> = std::sync::OnceLock::new();
+    STREAM.get_or_init(push).clone()
+  }
+  #[cfg(not(feature = "std"))]
+  push()
+}
+
 #[test]
 fn max_scene_duration_force_splits_cutless_content() {
-  let options = fixture_options().with_max_scene_duration(Some(Duration::from_millis(200)));
-  let mut det = detector(options);
-  let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 30, 33);
-  outputs.extend(det.finalize());
+  let outputs = capped_stream();
 
   let scenes = scenes(&outputs);
   assert!(
     scenes.len() >= 3,
-    "a 200 ms cap over ~1 s of cut-less content forces splits, got {}",
+    "a 200 ms cap over cut-less content forces splits, got {}",
     scenes.len()
   );
   assert!(scenes[0].provenance_ref().is_max_span());
@@ -938,11 +966,7 @@ fn max_scene_duration_force_splits_cutless_content() {
 
 #[test]
 fn keyframes_precede_their_scene_and_belong_to_its_range() {
-  let options = fixture_options().with_max_scene_duration(Some(Duration::from_millis(200)));
-  let mut det = detector(options);
-  let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 30, 33);
-  outputs.extend(det.finalize());
+  let outputs = capped_stream();
 
   // Walk the stream: every keyframe must fall inside the *next*
   // scene range to arrive (ts-based association).
@@ -993,7 +1017,7 @@ fn finalize_refreshes_for_the_next_stream() {
   let mut det = detector(fixture_options());
   let fix = Fixture::striped(40, 220, 20, 180);
   let first = {
-    let mut outputs = push_run(&mut det, &fix, 0, 6, 33);
+    let mut outputs = push_run(&mut det, &fix, 0, under_miri(6, 3), 33);
     outputs.extend(det.finalize());
     outputs
   };
@@ -1001,7 +1025,7 @@ fn finalize_refreshes_for_the_next_stream() {
 
   // Reused instance: a fresh stream starting at t=0 again.
   let second = {
-    let mut outputs = push_run(&mut det, &fix, 0, 6, 33);
+    let mut outputs = push_run(&mut det, &fix, 0, under_miri(6, 3), 33);
     outputs.extend(det.finalize());
     outputs
   };
@@ -1011,11 +1035,201 @@ fn finalize_refreshes_for_the_next_stream() {
   assert!(s[0].provenance_ref().is_finalized());
 }
 
+/// The frames [`finalize_at_fixture`] pushes, 33 ms apart: six — 0
+/// through 165 ms, the last shown until 198 ms — or under Miri three, 0
+/// through 66 ms, the last shown until 99 ms ([`under_miri`]).
+const FIXTURE_FRAMES: i64 = under_miri(6, 3);
+
+/// The fixture's last frame.
+const LAST_MS: i64 = (FIXTURE_FRAMES - 1) * 33;
+
+/// Where the fixture's last frame stops being shown.
+const SHOWN_MS: i64 = FIXTURE_FRAMES * 33;
+
+/// [`FIXTURE_FRAMES`] textured frames 33 ms apart, from 0.
+fn finalize_at_fixture(det: &mut Detector) -> Vec<Event> {
+  let fix = Fixture::striped(40, 220, 20, 180);
+  push_run(det, &fix, 0, FIXTURE_FRAMES, 33)
+}
+
+#[test]
+fn finalize_at_closes_the_trailing_shot_at_the_stated_end() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  outputs.extend(det.finalize_at(ts(SHOWN_MS)).expect("a representable end"));
+
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert!(
+    trailing.range().end().cmp_semantic(&ts(SHOWN_MS)).is_eq(),
+    "the trailing shot ends where the last frame stops being shown: {:?}",
+    trailing.range()
+  );
+  assert!(trailing.provenance_ref().is_finalized());
+  for k in keyframes(&outputs) {
+    assert!(
+      k.timestamp().cmp_semantic(&ts(SHOWN_MS)).is_lt(),
+      "no keyframe at or past the end: {:?}",
+      k.timestamp()
+    );
+  }
+}
+
+#[test]
+fn finalize_at_ceils_the_end_into_the_streams_timebase() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  // One 24 000th of a second past where the last frame stops being
+  // shown — 4 753 / 24 000 s, 198.04 ms, natively: the stream runs at
+  // 1/1000, and the end takes the ceiling every range endpoint takes
+  // there.
+  let fine = Timebase::new(1, NonZeroI32::new(24_000).expect("non-zero"));
+  outputs.extend(
+    det
+      .finalize_at(Timestamp::new(SHOWN_MS * 24 + 1, fine))
+      .expect("a representable end"),
+  );
+
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert_eq!(
+    trailing.range().end().timebase(),
+    tb(),
+    "the stream's own timebase"
+  );
+  assert!(
+    trailing
+      .range()
+      .end()
+      .cmp_semantic(&ts(SHOWN_MS + 1))
+      .is_eq(),
+    "the end rounds up to the next millisecond: {:?}",
+    trailing.range()
+  );
+}
+
+#[test]
+fn finalize_at_an_end_not_past_the_last_frame_closes_where_finalize_does() {
+  let mut plain = detector(fixture_options());
+  let mut expected = finalize_at_fixture(&mut plain);
+  expected.extend(plain.finalize());
+  let expected_end = scenes(&expected)
+    .last()
+    .expect("finalize closes the trailing shot")
+    .range()
+    .end();
+  assert!(
+    expected_end.cmp_semantic(&ts(LAST_MS + 1)).is_eq(),
+    "one tick past the last frame"
+  );
+
+  // At the last frame, before it, and before the stream's start: one
+  // branch, so under Miri the first alone.
+  for stated in [ts(LAST_MS), ts(LAST_MS - 65), ts(-5)]
+    .into_iter()
+    .take(under_miri(3, 1) as usize)
+  {
+    let mut det = detector(fixture_options());
+    let mut outputs = finalize_at_fixture(&mut det);
+    outputs.extend(det.finalize_at(stated).expect("a representable end"));
+    assert_eq!(
+      scenes(&outputs),
+      scenes(&expected),
+      "an end at or before the last frame ({stated:?}) closes one tick past it"
+    );
+    assert_eq!(keyframes(&outputs), keyframes(&expected));
+  }
+}
+
+#[test]
+fn finalize_at_with_nothing_pushed_emits_nothing() {
+  let mut det = detector(fixture_options());
+  assert!(
+    det
+      .finalize_at(ts(1_000))
+      .expect("a representable end")
+      .is_empty()
+  );
+}
+
+#[test]
+fn finalize_at_refuses_an_end_with_no_canonical_representation() {
+  // The stream runs at 1/M with M = i32::MAX, and the end is i64::MAX
+  // ticks of M seconds each: its canonical rescale is i64::MAX * M * M
+  // ticks, which no i64 holds.
+  let m = i32::MAX;
+  let fine = Timebase::new(1, NonZeroI32::new(m).expect("non-zero"));
+  let coarse = Timebase::new(m, NonZeroI32::new(1).expect("non-zero"));
+  let fix = Fixture::striped(40, 220, 20, 180);
+  let push_first = |det: &mut Detector| {
+    det
+      .push(fix.frames(Timestamp::new(0, fine)))
+      .expect("an ordered first frame")
+  };
+
+  let mut det = detector(fixture_options());
+  let mut outputs: Vec<Event> = push_first(&mut det).into_iter().collect();
+  let end = Timestamp::new(i64::MAX, coarse);
+  let refused = det
+    .finalize_at(end)
+    .expect_err("an end the canonical timebase cannot hold is refused, not clamped");
+  assert_eq!(refused.end(), end);
+  assert_eq!(
+    refused.timebase(),
+    fine,
+    "the canonical timebase is the first frame's"
+  );
+
+  // The refusal changed nothing: the same detector closes the stream
+  // exactly as one that was never asked would.
+  outputs.extend(det.finalize());
+  let mut fresh = detector(fixture_options());
+  let mut expected: Vec<Event> = push_first(&mut fresh).into_iter().collect();
+  expected.extend(fresh.finalize());
+  assert_eq!(outputs, expected);
+}
+
+#[test]
+fn finalize_at_takes_the_largest_representable_end() {
+  let mut det = detector(fixture_options());
+  let mut outputs = finalize_at_fixture(&mut det);
+  outputs.extend(
+    det
+      .finalize_at(ts(i64::MAX))
+      .expect("the canonical limit itself is representable"),
+  );
+  let s = scenes(&outputs);
+  let trailing = s.last().expect("the trailing shot closes");
+  assert!(
+    trailing.range().end().cmp_semantic(&ts(i64::MAX)).is_eq(),
+    "the stated end is the range's end, unclamped: {:?}",
+    trailing.range()
+  );
+}
+
+#[test]
+fn finalize_at_refreshes_for_the_next_stream() {
+  let mut det = detector(fixture_options());
+  let mut first = finalize_at_fixture(&mut det);
+  first.extend(det.finalize_at(ts(SHOWN_MS)).expect("a representable end"));
+  assert!(!scenes(&first).is_empty(), "first stream closed");
+
+  let mut second = finalize_at_fixture(&mut det);
+  second.extend(det.finalize());
+  let s = scenes(&second);
+  assert_eq!(s.len(), 1, "reused detector behaves like a fresh one");
+  assert!(s[0].range().start().cmp_semantic(&ts(0)).is_eq());
+  assert!(
+    s[0].range().end().cmp_semantic(&ts(LAST_MS + 1)).is_eq(),
+    "the stated end of the first stream does not leak into the second"
+  );
+}
+
 #[test]
 fn clear_discards_without_emitting() {
   let mut det = detector(fixture_options());
   let fix = Fixture::striped(40, 220, 20, 180);
-  let _ = push_run(&mut det, &fix, 0, 8, 33);
+  let _ = push_run(&mut det, &fix, 0, under_miri(8, 2), 33);
   det.clear();
   assert!(det.finalize().is_empty(), "nothing survives clear");
 }
@@ -1024,7 +1238,8 @@ fn clear_discards_without_emitting() {
 fn dimension_change_resets_visual_state_only() {
   let mut det = detector(fixture_options());
   let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 6, 33);
+  let n = under_miri(6, 3);
+  let mut outputs = push_run(&mut det, &fix, 0, n, 33);
 
   // Same content at half width: must not register as a cut
   // (cross-size deltas are meaningless), and the shot survives.
@@ -1038,7 +1253,7 @@ fn dimension_change_resets_visual_state_only() {
     .expect("consistent half views")
   }
   let half = Fixture::striped(40, 220, 20, 180);
-  for i in 6..12 {
+  for i in n..2 * n {
     if let Some(o) = det.push(small(ts(i * 33), &half)).expect("ordered stream") {
       outputs.push(o);
     }
@@ -1060,7 +1275,8 @@ fn flat_stream_emits_no_cuts_but_still_samples_keyframes() {
   // picks) and must all fall inside that single scene's range.
   let mut det = detector(fixture_options());
   let fix = Fixture::solid(120, 10, 10);
-  let mut outputs = push_run(&mut det, &fix, 0, 40, 33);
+  // Under Miri 12 frames, ~400 ms: four windows still to sample.
+  let mut outputs = push_run(&mut det, &fix, 0, under_miri(40, 12), 33);
   outputs.extend(det.finalize());
   let s = scenes(&outputs);
   assert_eq!(s.len(), 1, "static content is one finalized shot");
@@ -1090,9 +1306,10 @@ fn every_enabled_lane_cuts_directly() {
   let mut det = detector(options);
   let red = Fixture::solid(60, 10, 200);
   let blue = Fixture::solid(180, 120, 200);
+  let (frames, step) = SHOT;
 
-  let mut outputs = push_run(&mut det, &red, 0, 30, 40);
-  outputs.extend(push_run(&mut det, &blue, 30 * 40, 30, 40));
+  let mut outputs = push_run(&mut det, &red, 0, frames, step);
+  outputs.extend(push_run(&mut det, &blue, SHOT_MS, frames, step));
   outputs.extend(det.finalize());
 
   let scenes = scenes(&outputs);
@@ -1129,9 +1346,10 @@ fn chroma_only_cut_is_caught_by_the_saturation_lane() {
   let mut det = detector(fixture_options());
   let gray = Fixture::solid(120, 10, 0);
   let vivid = Fixture::solid(120, 10, 240);
+  let (frames, step) = SHOT;
 
-  let mut outputs = push_run(&mut det, &gray, 0, 30, 40);
-  outputs.extend(push_run(&mut det, &vivid, 30 * 40, 30, 40));
+  let mut outputs = push_run(&mut det, &gray, 0, frames, step);
+  outputs.extend(push_run(&mut det, &vivid, SHOT_MS, frames, step));
   outputs.extend(det.finalize());
 
   let scenes = scenes(&outputs);
@@ -1146,7 +1364,7 @@ fn chroma_only_cut_is_caught_by_the_saturation_lane() {
   );
   assert_eq!(
     scenes[0].range().end().pts(),
-    30 * 40,
+    SHOT_MS,
     "cut at the first frame of the new look"
   );
 }
@@ -1334,13 +1552,14 @@ fn cutless_stream_honors_max_scene_duration() {
     .with_select(select::Options::new().with_target_interval(Duration::from_millis(100)));
   let mut det = detector(options);
   let fix = Fixture::striped(40, 220, 20, 180);
-  let mut outputs = push_run(&mut det, &fix, 0, 30, 33);
+  // ~1 s of frames, or under Miri ~500 ms: past the cap twice either way.
+  let mut outputs = push_run(&mut det, &fix, 0, under_miri(30, 16), 33);
   outputs.extend(det.finalize());
 
   let scenes = scenes(&outputs);
   assert!(
     scenes.len() >= 3,
-    "a 200 ms cap over ~1 s of cut-less content forces splits, got {}",
+    "a 200 ms cap over cut-less content forces splits, got {}",
     scenes.len()
   );
   assert!(scenes[0].provenance_ref().is_max_span());
@@ -1618,9 +1837,10 @@ fn keyframes_partition_a_multi_scene_stream() {
   let a = Fixture::solid(60, 10, 200);
   let b = Fixture::solid(180, 120, 200);
   let c = Fixture::solid(110, 60, 80);
-  let mut outputs = push_run(&mut det, &a, 0, 30, 40);
-  outputs.extend(push_run(&mut det, &b, 1200, 30, 40));
-  outputs.extend(push_run(&mut det, &c, 2400, 30, 40));
+  let (frames, step) = SHOT;
+  let mut outputs = push_run(&mut det, &a, 0, frames, step);
+  outputs.extend(push_run(&mut det, &b, SHOT_MS, frames, step));
+  outputs.extend(push_run(&mut det, &c, 2 * SHOT_MS, frames, step));
   outputs.extend(det.finalize());
 
   let scenes = scenes(&outputs);
@@ -1702,7 +1922,8 @@ fn quality_and_fallback_keyframes_can_both_occur() {
   let sharp = Fixture::striped(150, 230, 20, 180);
   let flat = Fixture::solid(190, 10, 10);
   let mut outputs = Vec::new();
-  for i in 0..40_i64 {
+  // Under Miri 20 frames: two textured windows and two flat.
+  for i in 0..under_miri(40, 20) {
     let fix = if (i / 5) % 2 == 0 { &sharp } else { &flat };
     if let Some(o) = det.push(fix.frames(ts(i * 40))).expect("ordered") {
       outputs.push(o);
@@ -1826,18 +2047,31 @@ fn keyframes_of(kfs: &[KeyframeEvent], scene: &SceneEvent) -> Vec<KeyframeEvent>
 
 /// Three shots: two cuts plus the trailing close — so the assertions
 /// below cover a shot opened by the stream's first frame, shots opened
-/// by a confirmed cut, and the shot `finalize` closes.
+/// by a confirmed cut, and the shot `finalize` closes. Every law that
+/// reads it reads one stream, so with `std` it is pushed once.
 fn three_shot_stream() -> Vec<Event> {
+  #[cfg(feature = "std")]
+  {
+    static STREAM: std::sync::OnceLock<Vec<Event>> = std::sync::OnceLock::new();
+    STREAM.get_or_init(push_three_shots).clone()
+  }
+  #[cfg(not(feature = "std"))]
+  push_three_shots()
+}
+
+/// [`three_shot_stream`], pushed: red, blue, red, a [`SHOT`] each.
+fn push_three_shots() -> Vec<Event> {
   let options = Options::new()
     .with_detectors(Detectors::all())
     .with_select(select::Options::new().with_target_interval(Duration::from_millis(100)));
   let mut det = detector(options);
   let red = Fixture::solid(60, 10, 200);
   let blue = Fixture::solid(180, 120, 200);
+  let (frames, step) = SHOT;
 
-  let mut outputs = push_run(&mut det, &red, 0, 30, 40);
-  outputs.extend(push_run(&mut det, &blue, 30 * 40, 30, 40));
-  outputs.extend(push_run(&mut det, &red, 60 * 40, 30, 40));
+  let mut outputs = push_run(&mut det, &red, 0, frames, step);
+  outputs.extend(push_run(&mut det, &blue, SHOT_MS, frames, step));
+  outputs.extend(push_run(&mut det, &red, 2 * SHOT_MS, frames, step));
   outputs.extend(det.finalize());
   outputs
 }

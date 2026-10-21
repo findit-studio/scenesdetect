@@ -2238,15 +2238,16 @@ mod tests {
       .with_target_interval(Duration::from_secs(60 * 60)) // single bucket
       .with_adaptive_floor_min_samples(10);
     let mut det = Detector::new(opts);
-    for i in 0..20_000 {
+    // Fewer under Miri, which interprets slowly: 5_000 still pass the
+    // 4_096-sample cap, so the truncation runs.
+    let frames: i64 = if cfg!(miri) { 5_000 } else { 20_000 };
+    for i in 0..frames {
       // All frames at sharpness 50 (below absolute floor of 100).
       // Adaptive should lower the floor to ~50 and emit a strict
       // winner.
-      det
-        .observe(ts(i as i64 * 1000), good_metrics(50.0))
-        .unwrap();
+      det.observe(ts(i * 1000), good_metrics(50.0)).unwrap();
     }
-    let out = det.finalize_shot(tr(0, 20_000_000));
+    let out = det.finalize_shot(tr(0, frames * 1000));
     // A strict winner emerges (adaptive floor lowered to 50).
     // Exact-timestamp assertion would be brittle to tie-break
     // details under the truncated sample; just verify one emit.
